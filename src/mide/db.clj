@@ -1,10 +1,13 @@
 (ns mide.db
   (:require [clojure.java.io :as io]
+            [clojure.spec.alpha :as s]
+            [clojure.tools.logging :as log]
             [crux.api :as crux]
+            mide.db-spec
             mide.tempid))
 
 (defn gen-uuid []
-  (.toString (java.util.UUID/randomUUID)))
+  (java.util.UUID/randomUUID))
 
 (defn start-crux! []
   (letfn [(kv-store [dir]
@@ -24,20 +27,38 @@
   (.close crux-node))
 
 (defn insert!
-  "Transact several puts on node"
+  "xs is a vector of [type data]
+  type have to be defined as a spec"
   ([xs] (insert! xs nil))
   ([xs valid-time]
-   (let [xs' (if (map? xs) [xs] xs)
-         xs' (mide.tempid/resolve-tempids! xs')]
-     (crux/submit-tx
-      crux-node
-      (mapv (fn [x]
-              (let [id (or (:crux.db/id x) (:id x) (throw (Exception. "no id in " x)))
-                    x' (assoc (dissoc x :id) :crux.db/id id)]
+   (assert (= #{2} (into #{} (distinct (map count xs))))
+           "Data should be a tuple of [type data]")
+   (let [xs               (->> xs
+                               (mide.tempid/resolve-tempids!)
+                               (map (fn [[type {:keys [id] :as data}]]
+                                      [type
+                                       (if id
+                                         (-> data
+                                             (assoc :crux.db/id id)
+                                             (dissoc :id))
+                                         data)])))
+         invalid-data     (remove (fn [[type data]] (s/valid? type data)) xs)
+         invalid-data-ids (into #{} (map (fn [[_ data]] (:crux.db/id data)) invalid-data))
+         valid-data       (->> xs
+                               (remove (fn [[_ data]] (get invalid-data-ids (:crux.db/id data))))
+                               (map second))]
+     (when (seq invalid-data)
+       (doseq [[type data] invalid-data]
+         (log/errorf "Wrong data shape %s => %s" type data)))
+
+     (when (seq valid-data)
+       (crux/submit-tx
+        crux-node
+        (mapv (fn [x]
                 (if valid-time
-                  [:crux.tx/put x' valid-time]
-                  [:crux.tx/put x'])))
-            xs')))))
+                  [:crux.tx/put x valid-time]
+                  [:crux.tx/put x]))
+              valid-data))))))
 
 (defn query
   "Query helper"

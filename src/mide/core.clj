@@ -92,9 +92,9 @@
         repo-id (if repo
                   (:crux.db/id repo)
                   (let [repo-id (db/gen-uuid)]
-                    (db/insert! [{:crux.db/id repo-id
-                                  :repo/uri git-path
-                                  :repo/name project-name}])
+                    (db/insert! [[:db/repo {:crux.db/id repo-id
+                                            :repo/uri git-path
+                                            :repo/name project-name}]])
                     repo-id))
         commits-seq (commits git-path nil)
         already-ingested (->> (db/query {:find '[sha]
@@ -110,7 +110,7 @@
        (let [_ (println "Ingesting commit: " commit)
              {:keys [msg sha parents author authored] :as raw-commit} (sha+message->commit git-path commit)
              commit-id (db/gen-uuid)
-             commit-tx {:id commit-id
+             commit-tx {:crux.db/id commit-id
                         :git/type :commit
                         :git/sha  sha
                         :repo/ref repo-id
@@ -119,10 +119,10 @@
                         :commit/author author
                         :commit/authorAt authored}
              nodes-tx (->> (git-walk git-path raw-commit "/" :tree)
-                           (map #(assoc % :id (db/gen-uuid) :commit/ref commit-id))
+                           (map #(assoc % :crux.db/id (db/gen-uuid) :commit/ref commit-id))
                            (filter #(= :blob (:git/type %)))
                            (remove #(db/get-by-attributes (select-keys % [:file/path :git/sha]))))]
-         (db/insert! (cons commit-tx nodes-tx)))))))
+         (db/insert! (cons [:db/commit commit-tx] (map (fn [d] [:db/file d]) nodes-tx))))))))
 
 (defn run-analyzer! [git-path]
   (let [analyzer-name :clj
@@ -160,10 +160,11 @@
                                                                 :sha sha})
                            ;(clojure.stacktrace/print-stack-trace ex)
                            []))
-            op-data {:id (db/tempid)
-                     :tx/file-ref file-id
-                     :tx/sha sha
-                     :tx/analyzer analyzer-name
-                     :tx/analyzer-revision analyzer-version}]
+            op-data [:db/op
+                     {:crux.db/id (db/tempid)
+                      :tx/file-ref file-id
+                      :tx/sha sha
+                      :tx/analyzer analyzer-name
+                      :tx/analyzer-revision analyzer-version}]]
 
-        (db/insert! (cons op-data codeq-data))))))
+        (db/insert! (cons op-data (map (fn [d] [:db/codeq d]) codeq-data)))))))
